@@ -15,8 +15,8 @@ public static class SymbolLookupTools
     public static async Task<string> FindSymbol(
         WorkspaceService workspace,
         [Description("Symbol name to search for (exact match)")] string name,
-        [Description("Optional: filter by symbol kind (class, method, property, field, interface, enum, struct, namespace)")] string? kind,
-        CancellationToken ct)
+        [Description("Optional: filter by symbol kind (class, method, property, field, interface, enum, struct, namespace)")] string? kind = null,
+        CancellationToken ct = default)
     {
         var symbols = await workspace.FindSymbolsAsync(name, ct);
         var filtered = FilterByKind(symbols, kind);

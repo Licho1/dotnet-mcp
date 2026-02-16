@@ -15,9 +15,9 @@ public static class FindReferencesTools
     public static async Task<string> FindReferences(
         WorkspaceService workspace,
         [Description("Symbol name to find references for")] string symbolName,
-        [Description("Optional: filter by symbol kind (class, method, property, field, interface)")] string? kind,
-        [Description("Optional: max number of references to return (default: 100)")] int? maxResults,
-        CancellationToken ct)
+        [Description("Optional: filter by symbol kind (class, method, property, field, interface)")] string? kind = null,
+        [Description("Optional: max number of references to return (default: 100)")] int? maxResults = null,
+        CancellationToken ct = default)
     {
         var symbols = await workspace.FindSymbolsAsync(symbolName, ct);
 

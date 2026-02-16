@@ -96,9 +96,9 @@ public static class TypeHierarchyTools
     public static async Task<string> ListMembers(
         WorkspaceService workspace,
         [Description("Type name to inspect")] string typeName,
-        [Description("Optional: filter by member kind (method, property, field, event)")] string? memberKind,
-        [Description("Optional: include inherited members (default: false)")] bool includeInherited,
-        CancellationToken ct)
+        [Description("Optional: filter by member kind (method, property, field, event)")] string? memberKind = null,
+        [Description("Optional: include inherited members (default: false)")] bool includeInherited = false,
+        CancellationToken ct = default)
     {
         var symbols = await workspace.FindSymbolsAsync(typeName, ct);
         var type = symbols.OfType<INamedTypeSymbol>().FirstOrDefault();
