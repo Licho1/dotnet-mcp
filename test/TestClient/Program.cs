@@ -82,4 +82,29 @@ await Test("Expression Type", "expression-type", new()
     ["column"] = 5
 });
 
+// === Phase 2 tools ===
+
+await Test("Get Source: WorkspaceService", "get-source", new()
+{
+    ["symbolName"] = "WorkspaceService"
+});
+
+await Test("Get Source (method): LoadSolutionAsync", "get-source", new()
+{
+    ["symbolName"] = "LoadSolutionAsync",
+    ["kind"] = "method"
+});
+
+await Test("Document Symbols", "get-document-symbols", new()
+{
+    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs")
+});
+
+await Test("Goto Definition (workspace field usage)", "goto-definition", new()
+{
+    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs"),
+    ["line"] = 31,
+    ["column"] = 9
+});
+
 Console.WriteLine("\n\nAll tests completed!");
