@@ -107,4 +107,18 @@ await Test("Goto Definition (workspace field usage)", "goto-definition", new()
     ["column"] = 9
 });
 
+// === Call Graph tools ===
+
+await Test("Find Callers: FindSymbolsAsync", "find-callers", new()
+{
+    ["methodName"] = "FindSymbolsAsync",
+    ["typeName"] = "WorkspaceService"
+});
+
+await Test("Find Callees: LoadSolutionAsync", "find-callees", new()
+{
+    ["methodName"] = "LoadSolutionAsync",
+    ["typeName"] = "WorkspaceService"
+});
+
 Console.WriteLine("\n\nAll tests completed!");

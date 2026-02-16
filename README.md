@@ -30,6 +30,12 @@ MCP server providing semantic C# code understanding to AI assistants via [Roslyn
 | `get-document-symbols` | File outline — all declarations with line numbers |
 | `get-source` | Extract source code or decompile metadata assemblies |
 
+### Call Graph
+| Tool | Description |
+|------|-------------|
+| `find-callers` | Find all methods that call a given method |
+| `find-callees` | Find all methods called by a given method |
+
 ### Refactoring
 | Tool | Description |
 |------|-------------|
