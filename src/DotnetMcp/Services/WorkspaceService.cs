@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.FindSymbols;
@@ -37,6 +39,72 @@ public class WorkspaceService : IDisposable
 
         var projectNames = solution.Projects.Select(p => p.Name).ToList();
         return $"Loaded {solutionPath} with {projectNames.Count} projects: {string.Join(", ", projectNames)}";
+    }
+
+    public async Task<string> LoadSlnxAsync(string slnxPath, CancellationToken ct = default)
+    {
+        slnxPath = Path.GetFullPath(slnxPath);
+        if (!File.Exists(slnxPath))
+            return $"Solution not found: {slnxPath}";
+
+        if (loadedSolutionPath == slnxPath && solution is not null)
+            return $"Solution already loaded: {slnxPath}";
+
+        var dir = Path.GetDirectoryName(slnxPath)!;
+        var doc = XDocument.Load(slnxPath);
+        var projectPaths = doc.Descendants("Project")
+            .Select(e => e.Attribute("Path")?.Value)
+            .Where(p => p is not null && p.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+            .Select(p => Path.GetFullPath(Path.Combine(dir, p!)))
+            .Where(File.Exists)
+            .ToList();
+
+        if (projectPaths.Count == 0)
+            return $"No .csproj projects found in {slnxPath}";
+
+        workspace?.Dispose();
+        workspace = MSBuildWorkspace.Create();
+        workspace.WorkspaceFailed += (_, _) => { };
+
+        foreach (var projectPath in projectPaths)
+        {
+            // Skip if already loaded as a transitive dependency of a previous project
+            if (workspace.CurrentSolution.Projects.Any(p =>
+                    string.Equals(p.FilePath, projectPath, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            await workspace.OpenProjectAsync(projectPath, cancellationToken: ct);
+        }
+
+        solution = workspace.CurrentSolution;
+        loadedSolutionPath = slnxPath;
+
+        var projectNames = solution.Projects.Select(p => p.Name).ToList();
+        return $"Loaded {slnxPath} with {projectNames.Count} projects: {string.Join(", ", projectNames)}";
+    }
+
+    public async Task<string> LoadSlnfAsync(string slnfPath, CancellationToken ct = default)
+    {
+        slnfPath = Path.GetFullPath(slnfPath);
+        if (!File.Exists(slnfPath))
+            return $"Solution filter not found: {slnfPath}";
+
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(slnfPath, ct));
+        if (!json.RootElement.TryGetProperty("solution", out var solutionElement) ||
+            !solutionElement.TryGetProperty("path", out var pathElement))
+            return $"Invalid .slnf format: missing solution.path in {slnfPath}";
+
+        var solutionRelPath = pathElement.GetString();
+        if (string.IsNullOrEmpty(solutionRelPath))
+            return $"Empty solution path in {slnfPath}";
+
+        var dir = Path.GetDirectoryName(slnfPath)!;
+        var solutionPath = Path.GetFullPath(Path.Combine(dir, solutionRelPath));
+
+        // Load the referenced solution (could be .sln or .slnx)
+        var ext = Path.GetExtension(solutionPath);
+        return ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase)
+            ? await LoadSlnxAsync(solutionPath, ct)
+            : await LoadSolutionAsync(solutionPath, ct);
     }
 
     public async Task<string> LoadProjectAsync(string projectPath, CancellationToken ct = default)

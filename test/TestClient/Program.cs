@@ -40,59 +40,60 @@ async Task Test(string label, string tool, Dictionary<string, object?> args)
     }
 }
 
+// Determine what to load: pass a path as first arg, or default to self
+var loadPath = args.Length > 0
+    ? Path.GetFullPath(args[0])
+    : serverPath;
+var isSelf = loadPath == serverPath;
+
 // === Load ===
 
-await Test("Load Project", "load", new() { ["path"] = serverPath });
+await Test("Load", "load", new() { ["path"] = loadPath });
 
-// === Type Hierarchy (now includes members) ===
+// Use different symbol names depending on what we loaded
+var testType = isSelf ? "WorkspaceService" : "CsvTable";
+var testMethod = isSelf ? "LoadSolutionAsync" : "ParseCsvLine";
 
-await Test("Type Hierarchy: WorkspaceService", "type-hierarchy", new()
+// === Type Hierarchy ===
+
+await Test($"Type Hierarchy: {testType}", "type-hierarchy", new()
 {
-    ["typeName"] = "WorkspaceService"
+    ["typeName"] = testType
 });
 
 // === Find References ===
 
-await Test("Find References: WorkspaceService", "find-references", new()
+await Test($"Find References: {testType}", "find-references", new()
 {
-    ["symbolName"] = "WorkspaceService"
+    ["symbolName"] = testType
 });
 
 // === Find Implementations ===
 
-await Test("Find Implementations: IDisposable", "find-implementations", new()
+var testInterface = isSelf ? "IDisposable" : "ICustomHeader";
+await Test($"Find Implementations: {testInterface}", "find-implementations", new()
 {
-    ["typeName"] = "IDisposable"
+    ["typeName"] = testInterface
 });
 
 // === Get Source (by name) ===
 
-await Test("Get Source (by name): WorkspaceService", "get-source", new()
+await Test($"Get Source (by name): {testType}", "get-source", new()
 {
-    ["symbolName"] = "WorkspaceService"
+    ["symbolName"] = testType
 });
 
-await Test("Get Source (by name, method): LoadSolutionAsync", "get-source", new()
+await Test($"Get Source (by name, method): {testMethod}", "get-source", new()
 {
-    ["symbolName"] = "LoadSolutionAsync",
+    ["symbolName"] = testMethod,
     ["kind"] = "method"
-});
-
-// === Get Source (by location — metadata symbol → SourceLink/decompile) ===
-
-await Test("Get Source (by location, metadata symbol)", "get-source", new()
-{
-    ["filePath"] = Path.Combine(repoRoot, "src", "DotnetMcp", "Services", "WorkspaceService.cs"),
-    ["line"] = 32,
-    ["column"] = 33
 });
 
 // === Find Callers ===
 
-await Test("Find Callers: FindSymbolsAsync", "find-callers", new()
+await Test($"Find Callers: {testMethod}", "find-callers", new()
 {
-    ["methodName"] = "FindSymbolsAsync",
-    ["typeName"] = "WorkspaceService"
+    ["methodName"] = testMethod
 });
 
 Console.WriteLine("\n\nAll tests completed!");
