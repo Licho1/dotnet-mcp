@@ -1,13 +1,10 @@
 using System.ComponentModel;
 using System.Text;
 using DotnetMcp.Services;
-using ICSharpCode.Decompiler;
-using ICSharpCode.Decompiler.CSharp;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using ModelContextProtocol.Server;
-using FullTypeName = ICSharpCode.Decompiler.TypeSystem.FullTypeName;
 
 namespace DotnetMcp.Tools;
 
@@ -15,115 +12,83 @@ namespace DotnetMcp.Tools;
 public static class SourceTools
 {
     [McpServerTool(Name = "get-source"), Description(
-        "Get the source code of a symbol. For source symbols, extracts from syntax tree. " +
-        "For metadata symbols (NuGet packages, framework), decompiles the assembly.")]
+        "Get the source code of a symbol. Resolves through: local source, SourceLink (downloads original from GitHub/etc), " +
+        "embedded PDB source, or decompilation (ILSpy) as fallback. " +
+        "Can look up by symbol name OR by file:line:col location (useful for navigating to library code at a call site).")]
     public static async Task<string> GetSource(
         WorkspaceService workspace,
-        [Description("Symbol name to get source for")] string symbolName,
+        SourceResolutionService resolver,
+        [Description("Symbol name to get source for (use this OR filePath+line+column)")] string? symbolName = null,
         [Description("Optional: filter by symbol kind (class, method, property, field, interface)")] string? kind = null,
+        [Description("Full path to source file (use with line+column to resolve symbol at location)")] string? filePath = null,
+        [Description("Line number (1-based, use with filePath)")] int? line = null,
+        [Description("Column number (1-based, use with filePath)")] int? column = null,
         CancellationToken ct = default)
     {
-        var symbols = await workspace.FindSymbolsAsync(symbolName, ct);
+        ISymbol? symbol;
 
-        if (!string.IsNullOrEmpty(kind))
+        if (filePath is not null && line is not null)
         {
-            symbols = kind.ToLowerInvariant() switch
+            // Resolve symbol at file:line:col location
+            symbol = await ResolveSymbolAtLocation(workspace, filePath, line.Value, column ?? 1, ct);
+            if (symbol is null)
+                return $"No symbol found at {filePath}:{line}:{column ?? 1}";
+        }
+        else if (symbolName is not null)
+        {
+            // Look up by name
+            var symbols = await workspace.FindSymbolsAsync(symbolName, ct);
+
+            if (!string.IsNullOrEmpty(kind))
             {
-                "class" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Class }),
-                "interface" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Interface }),
-                "method" => symbols.Where(s => s is IMethodSymbol),
-                "property" => symbols.Where(s => s is IPropertySymbol),
-                "field" => symbols.Where(s => s is IFieldSymbol),
-                _ => symbols
-            };
+                symbols = kind.ToLowerInvariant() switch
+                {
+                    "class" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Class }),
+                    "interface" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Interface }),
+                    "method" => symbols.Where(s => s is IMethodSymbol),
+                    "property" => symbols.Where(s => s is IPropertySymbol),
+                    "field" => symbols.Where(s => s is IFieldSymbol),
+                    _ => symbols
+                };
+            }
+
+            symbol = symbols.FirstOrDefault();
+            if (symbol is null)
+                return $"No symbol found matching '{symbolName}'.";
         }
-
-        var symbol = symbols.FirstOrDefault();
-        if (symbol is null)
-            return $"No symbol found matching '{symbolName}'.";
-
-        var location = symbol.Locations.FirstOrDefault();
-
-        // Source symbol — extract from syntax tree
-        if (location?.IsInSource == true)
+        else
         {
-            var tree = location.SourceTree;
-            if (tree is null) return "Could not get syntax tree.";
-
-            var root = await tree.GetRootAsync(ct);
-            var node = root.FindNode(location.SourceSpan);
-
-            // Walk up to the declaration node
-            var declaration = node.AncestorsAndSelf().FirstOrDefault(n =>
-                n is TypeDeclarationSyntax or MethodDeclarationSyntax or PropertyDeclarationSyntax
-                or FieldDeclarationSyntax or EnumDeclarationSyntax or InterfaceDeclarationSyntax
-                or ConstructorDeclarationSyntax or EventDeclarationSyntax or DelegateDeclarationSyntax
-                or RecordDeclarationSyntax);
-
-            var sourceText = (declaration ?? node).ToFullString().Trim();
-            var lineSpan = location.GetLineSpan();
-            return $"// {lineSpan.Path}:{lineSpan.StartLinePosition.Line + 1}\n{sourceText}";
+            return "Provide either 'symbolName' or 'filePath'+'line' to locate the symbol.";
         }
 
-        // Metadata symbol — try to decompile
-        if (location?.IsInMetadata == true && symbol.ContainingAssembly is not null)
-        {
-            return DecompileSymbol(workspace, symbol);
-        }
+        var result = await resolver.ResolveAsync(symbol, ct);
+        if (result is null)
+            return $"Could not resolve source for '{symbol.ToDisplayString()}'.";
 
-        return $"Symbol '{symbolName}' has no source or metadata location.";
+        return $"// {result.FilePath} [{result.ResolutionMethod}]\n{result.Source}";
     }
 
-    static string DecompileSymbol(WorkspaceService workspace, ISymbol symbol)
+    static async Task<ISymbol?> ResolveSymbolAtLocation(
+        WorkspaceService workspace, string filePath, int line, int column, CancellationToken ct)
     {
-        // Find the assembly path from the compilation references
-        var sln = workspace.GetSolution();
-        foreach (var project in sln.Projects)
-        {
-            foreach (var reference in project.MetadataReferences)
-            {
-                if (reference is not PortableExecutableReference peRef) continue;
-                if (peRef.FilePath is null) continue;
+        var semanticModel = await workspace.GetSemanticModelAsync(filePath, ct);
+        var syntaxTree = await workspace.GetSyntaxTreeAsync(filePath, ct);
+        if (semanticModel is null || syntaxTree is null) return null;
 
-                // Check if this reference contains the symbol's assembly
-                if (!peRef.FilePath.Contains(symbol.ContainingAssembly.Name, StringComparison.OrdinalIgnoreCase))
-                    continue;
+        var root = await syntaxTree.GetRootAsync(ct);
+        var text = await syntaxTree.GetTextAsync(ct);
 
-                try
-                {
-                    var decompiler = new CSharpDecompiler(peRef.FilePath, new DecompilerSettings());
+        if (line < 1 || line > text.Lines.Count) return null;
 
-                    if (symbol is INamedTypeSymbol namedType)
-                    {
-                        var fullName = new FullTypeName(namedType.GetMetadataName());
-                        return $"// Decompiled from {peRef.FilePath}\n{decompiler.DecompileTypeAsString(fullName)}";
-                    }
+        var position = text.Lines[line - 1].Start + (column - 1);
+        var token = root.FindToken(position);
+        var node = token.Parent;
+        if (node is null) return null;
 
-                    // For members, find the parent type first
-                    if (symbol.ContainingType is not null)
-                    {
-                        var parentName = new FullTypeName(symbol.ContainingType.GetMetadataName());
-                        var typeDef = decompiler.TypeSystem.MainModule.GetTypeDefinition(parentName.TopLevelTypeName);
-                        if (typeDef is not null)
-                        {
-                            var member = typeDef.Members.FirstOrDefault(m =>
-                                m.Name == symbol.Name);
-                            if (member is not null)
-                                return $"// Decompiled from {peRef.FilePath}\n{decompiler.DecompileAsString(member.MetadataToken)}";
-                        }
-
-                        // Fall back to decompiling the whole type
-                        return $"// Decompiled from {peRef.FilePath}\n{decompiler.DecompileTypeAsString(parentName)}";
-                    }
-                }
-                catch (Exception ex)
-                {
-                    return $"Failed to decompile: {ex.Message}";
-                }
-            }
-        }
-
-        return $"Could not find assembly for '{symbol.ContainingAssembly.Name}' to decompile.";
+        var symbolInfo = semanticModel.GetSymbolInfo(node);
+        return symbolInfo.Symbol
+            ?? symbolInfo.CandidateSymbols.FirstOrDefault()
+            ?? semanticModel.GetDeclaredSymbol(node);
     }
 
     [McpServerTool(Name = "get-document-symbols"), Description(

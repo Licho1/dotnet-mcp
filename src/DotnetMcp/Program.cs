@@ -9,6 +9,7 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 
 builder.Services.AddSingleton<WorkspaceService>();
+builder.Services.AddSingleton<SourceResolutionService>();
 builder.Services
     .AddMcpServer(options =>
     {

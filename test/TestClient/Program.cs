@@ -84,15 +84,23 @@ await Test("Expression Type", "expression-type", new()
 
 // === Phase 2 tools ===
 
-await Test("Get Source: WorkspaceService", "get-source", new()
+await Test("Get Source (by name): WorkspaceService", "get-source", new()
 {
     ["symbolName"] = "WorkspaceService"
 });
 
-await Test("Get Source (method): LoadSolutionAsync", "get-source", new()
+await Test("Get Source (by name, method): LoadSolutionAsync", "get-source", new()
 {
     ["symbolName"] = "LoadSolutionAsync",
     ["kind"] = "method"
+});
+
+// Test file:line:col lookup — resolves MSBuildWorkspace.Create() call (metadata symbol → decompile)
+await Test("Get Source (by location, metadata symbol)", "get-source", new()
+{
+    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs"),
+    ["line"] = 32,
+    ["column"] = 33
 });
 
 await Test("Document Symbols", "get-document-symbols", new()

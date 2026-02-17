@@ -28,7 +28,7 @@ MCP server providing semantic C# code understanding to AI assistants via [Roslyn
 | `type-hierarchy` | Full hierarchy: base types, interfaces, derived types |
 | `list-members` | All members of a type with signatures and visibility |
 | `get-document-symbols` | File outline — all declarations with line numbers |
-| `get-source` | Extract source code or decompile metadata assemblies |
+| `get-source` | Get source via: local files, SourceLink, embedded PDB, or decompilation. Supports name or file:line:col lookup |
 
 ### Call Graph
 | Tool | Description |
