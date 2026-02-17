@@ -11,8 +11,7 @@ namespace DotnetMcp.Tools;
 public static class RenameTools
 {
     [McpServerTool(Name = "rename-symbol"), Description(
-        "Rename a symbol across the entire solution. Applies changes to disk and returns a summary of modified files. " +
-        "Use find-symbol first to verify the symbol exists and is unique.")]
+        "Rename a symbol across the entire solution. Applies changes to disk and returns a summary of modified files.")]
     public static async Task<string> RenameSymbol(
         WorkspaceService workspace,
         [Description("Current symbol name")] string symbolName,

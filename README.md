@@ -6,39 +6,14 @@ MCP server providing semantic C# code understanding to AI assistants via [Roslyn
 
 ## Tools
 
-### Solution Management
 | Tool | Description |
 |------|-------------|
-| `load-solution` | Load a .sln file for analysis |
-| `load-project` | Load a single .csproj file |
-| `list-projects` | List all projects in loaded solution |
-
-### Symbol Discovery
-| Tool | Description |
-|------|-------------|
-| `find-symbol` | Find symbol declarations by name with kind filter |
-| `find-references` | Find all usages of a symbol across the solution |
+| `load` | Load a .sln or .csproj file for analysis |
+| `get-source` | Resolve a symbol (by name or file:line:col) and get its source code + metadata. 4-tier resolution: local source, SourceLink, embedded PDB, decompilation |
+| `type-hierarchy` | Full type info: base types, interfaces, derived types/implementations, and all members |
+| `find-references` | Find all usages of a symbol across the solution (semantic, not text search) |
 | `find-implementations` | Find interface implementations or derived classes |
-| `expression-type` | Resolve the type of an expression at file:line:col |
-
-### Code Navigation
-| Tool | Description |
-|------|-------------|
-| `goto-definition` | Jump from usage to definition (file:line:col → definition location) |
-| `type-hierarchy` | Full hierarchy: base types, interfaces, derived types |
-| `list-members` | All members of a type with signatures and visibility |
-| `get-document-symbols` | File outline — all declarations with line numbers |
-| `get-source` | Get source via: local files, SourceLink, embedded PDB, or decompilation. Supports name or file:line:col lookup |
-
-### Call Graph
-| Tool | Description |
-|------|-------------|
 | `find-callers` | Find all methods that call a given method |
-| `find-callees` | Find all methods called by a given method |
-
-### Refactoring
-| Tool | Description |
-|------|-------------|
 | `rename-symbol` | Semantic rename across entire solution, writes to disk |
 
 ## Setup
@@ -56,7 +31,7 @@ Add to your MCP config (`.mcp.json`):
   "mcpServers": {
     "dotnet-mcp": {
       "command": "dotnet",
-      "args": ["run", "--project", "c:/work/dotnet-mcp/src/DotnetMcp/DotnetMcp.csproj"]
+      "args": ["run", "--project", "/path/to/dotnet-mcp/src/DotnetMcp/DotnetMcp.csproj"]
     }
   }
 }

@@ -1,7 +1,8 @@
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
-var serverPath = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\DotnetMcp.csproj");
+var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+var serverPath = Path.Combine(repoRoot, "src", "DotnetMcp", "DotnetMcp.csproj");
 
 Console.WriteLine($"Connecting to server: {serverPath}");
 
@@ -39,50 +40,32 @@ async Task Test(string label, string tool, Dictionary<string, object?> args)
     }
 }
 
-await Test("Load Project", "load-project", new() { ["projectPath"] = serverPath });
+// === Load ===
 
-await Test("Find Symbol: WorkspaceService", "find-symbol", new()
-{
-    ["name"] = "WorkspaceService"
-});
+await Test("Load Project", "load", new() { ["path"] = serverPath });
 
-await Test("Find Symbol (kind=method): LoadSolutionAsync", "find-symbol", new()
-{
-    ["name"] = "LoadSolutionAsync",
-    ["kind"] = "method"
-});
+// === Type Hierarchy (now includes members) ===
 
 await Test("Type Hierarchy: WorkspaceService", "type-hierarchy", new()
 {
     ["typeName"] = "WorkspaceService"
 });
 
-await Test("List Members: WorkspaceService", "list-members", new()
-{
-    ["typeName"] = "WorkspaceService",
-    ["includeInherited"] = false
-});
+// === Find References ===
 
 await Test("Find References: WorkspaceService", "find-references", new()
 {
     ["symbolName"] = "WorkspaceService"
 });
 
+// === Find Implementations ===
+
 await Test("Find Implementations: IDisposable", "find-implementations", new()
 {
     ["typeName"] = "IDisposable"
 });
 
-await Test("List Projects", "list-projects", new());
-
-await Test("Expression Type", "expression-type", new()
-{
-    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs"),
-    ["line"] = 15,
-    ["column"] = 5
-});
-
-// === Phase 2 tools ===
+// === Get Source (by name) ===
 
 await Test("Get Source (by name): WorkspaceService", "get-source", new()
 {
@@ -95,37 +78,20 @@ await Test("Get Source (by name, method): LoadSolutionAsync", "get-source", new(
     ["kind"] = "method"
 });
 
-// Test file:line:col lookup — resolves MSBuildWorkspace.Create() call (metadata symbol → decompile)
+// === Get Source (by location — metadata symbol → SourceLink/decompile) ===
+
 await Test("Get Source (by location, metadata symbol)", "get-source", new()
 {
-    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs"),
+    ["filePath"] = Path.Combine(repoRoot, "src", "DotnetMcp", "Services", "WorkspaceService.cs"),
     ["line"] = 32,
     ["column"] = 33
 });
 
-await Test("Document Symbols", "get-document-symbols", new()
-{
-    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs")
-});
-
-await Test("Goto Definition (workspace field usage)", "goto-definition", new()
-{
-    ["filePath"] = Path.GetFullPath(@"C:\work\dotnet-mcp\src\DotnetMcp\Services\WorkspaceService.cs"),
-    ["line"] = 31,
-    ["column"] = 9
-});
-
-// === Call Graph tools ===
+// === Find Callers ===
 
 await Test("Find Callers: FindSymbolsAsync", "find-callers", new()
 {
     ["methodName"] = "FindSymbolsAsync",
-    ["typeName"] = "WorkspaceService"
-});
-
-await Test("Find Callees: LoadSolutionAsync", "find-callees", new()
-{
-    ["methodName"] = "LoadSolutionAsync",
     ["typeName"] = "WorkspaceService"
 });
 

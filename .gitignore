@@ -1,6 +1,7 @@
 bin/
 obj/
 .vs/
+.idea/
 *.user
 *.suo
 *.DotSettings.user

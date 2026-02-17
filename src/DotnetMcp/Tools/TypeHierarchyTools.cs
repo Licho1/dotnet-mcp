@@ -10,8 +10,9 @@ namespace DotnetMcp.Tools;
 public static class TypeHierarchyTools
 {
     [McpServerTool(Name = "type-hierarchy"), Description(
-        "Show the full type hierarchy for a named type: base types (ancestors), " +
-        "implemented interfaces, and derived types (descendants).")]
+        "Full type information: base types, interfaces, derived types/implementations, and all members. " +
+        "Provides the complete picture of a type that text search cannot — inheritance chains, " +
+        "interface implementations across the solution, and member signatures with visibility.")]
     public static async Task<string> TypeHierarchy(
         WorkspaceService workspace,
         [Description("Type name to look up")] string typeName,
@@ -24,10 +25,10 @@ public static class TypeHierarchyTools
             return $"No type found matching '{typeName}'.";
 
         var sb = new StringBuilder();
-        sb.AppendLine($"# Type Hierarchy for {type.ToDisplayString()}");
+        sb.AppendLine($"# {type.TypeKind} {type.ToDisplayString()}");
         sb.AppendLine();
 
-        // Ancestors (base type chain)
+        // Base types
         sb.AppendLine("## Base Types");
         var current = type.BaseType;
         var depth = 1;
@@ -42,131 +43,72 @@ public static class TypeHierarchyTools
         // Interfaces
         sb.AppendLine();
         sb.AppendLine("## Implemented Interfaces");
-        var interfaces = type.AllInterfaces;
-        if (interfaces.IsEmpty)
+        if (type.AllInterfaces.IsEmpty)
         {
             sb.AppendLine("  (none)");
         }
         else
         {
-            foreach (var iface in interfaces.OrderBy(i => i.ToDisplayString()))
+            foreach (var iface in type.AllInterfaces.OrderBy(i => i.ToDisplayString()))
                 sb.AppendLine($"  : {FormatType(iface)}");
         }
 
-        // Derived types
+        // Derived types / implementations
         sb.AppendLine();
         sb.AppendLine("## Derived Types");
         if (type.TypeKind == TypeKind.Interface)
         {
             var implementations = await workspace.FindImplementationsAsync(type, ct);
             if (!implementations.Any())
-            {
                 sb.AppendLine("  (no implementations found)");
-            }
             else
-            {
                 foreach (var impl in implementations.OrderBy(t => t.ToDisplayString()))
                     sb.AppendLine($"  → {FormatType(impl)}");
-            }
         }
         else if (!type.IsSealed)
         {
             var derived = await workspace.FindDerivedTypesAsync(type, ct);
             if (!derived.Any())
-            {
                 sb.AppendLine("  (no derived types found)");
-            }
             else
-            {
                 foreach (var d in derived.OrderBy(t => t.ToDisplayString()))
                     sb.AppendLine($"  → {FormatType(d)}");
-            }
         }
         else
         {
             sb.AppendLine("  (sealed type)");
         }
 
-        return sb.ToString().TrimEnd();
-    }
-
-    [McpServerTool(Name = "list-members"), Description(
-        "List all members of a type (methods, properties, fields, events). " +
-        "Shows visibility, return types, and parameter signatures.")]
-    public static async Task<string> ListMembers(
-        WorkspaceService workspace,
-        [Description("Type name to inspect")] string typeName,
-        [Description("Optional: filter by member kind (method, property, field, event)")] string? memberKind = null,
-        [Description("Optional: include inherited members (default: false)")] bool includeInherited = false,
-        CancellationToken ct = default)
-    {
-        var symbols = await workspace.FindSymbolsAsync(typeName, ct);
-        var type = symbols.OfType<INamedTypeSymbol>().FirstOrDefault();
-
-        if (type is null)
-            return $"No type found matching '{typeName}'.";
-
-        var members = includeInherited
-            ? type.GetMembers().Concat(GetInheritedMembers(type))
-            : type.GetMembers();
-
-        // Filter out compiler-generated
-        members = members.Where(m => !m.IsImplicitlyDeclared && m.CanBeReferencedByName);
-
-        if (!string.IsNullOrEmpty(memberKind))
-        {
-            members = memberKind.ToLowerInvariant() switch
-            {
-                "method" => members.Where(m => m is IMethodSymbol { MethodKind: MethodKind.Ordinary }),
-                "property" => members.Where(m => m is IPropertySymbol),
-                "field" => members.Where(m => m is IFieldSymbol),
-                "event" => members.Where(m => m is IEventSymbol),
-                _ => members
-            };
-        }
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"# Members of {type.ToDisplayString()}");
+        // Members
         sb.AppendLine();
+        sb.AppendLine("## Members");
+        var members = type.GetMembers()
+            .Where(m => !m.IsImplicitlyDeclared && m.CanBeReferencedByName)
+            .OrderBy(m => m.Kind).ThenBy(m => m.Name);
 
-        foreach (var member in members.OrderBy(m => m.Kind).ThenBy(m => m.Name))
+        foreach (var member in members)
         {
             var vis = member.DeclaredAccessibility.ToString().ToLowerInvariant();
-            var loc = member.Locations.FirstOrDefault();
-            var locStr = loc?.IsInSource == true
-                ? $" @ {loc.SourceTree?.FilePath}:{loc.GetLineSpan().StartLinePosition.Line + 1}"
-                : "";
-
             switch (member)
             {
                 case IMethodSymbol m when m.MethodKind == MethodKind.Ordinary:
                     var parms = string.Join(", ", m.Parameters.Select(p => $"{p.Type.ToDisplayString()} {p.Name}"));
-                    sb.AppendLine($"  [{vis}] {m.ReturnType.ToDisplayString()} {m.Name}({parms}){locStr}");
+                    sb.AppendLine($"  [{vis}] {m.ReturnType.ToDisplayString()} {m.Name}({parms})");
                     break;
                 case IPropertySymbol p:
-                    sb.AppendLine($"  [{vis}] {p.Type.ToDisplayString()} {p.Name} {{ {(p.GetMethod is not null ? "get; " : "")}{(p.SetMethod is not null ? "set; " : "")}}}{locStr}");
+                    var accessors = $"{(p.GetMethod is not null ? "get; " : "")}{(p.SetMethod is not null ? "set; " : "")}";
+                    sb.AppendLine($"  [{vis}] {p.Type.ToDisplayString()} {p.Name} {{ {accessors}}}");
                     break;
                 case IFieldSymbol f:
-                    sb.AppendLine($"  [{vis}] {f.Type.ToDisplayString()} {f.Name}{locStr}");
+                    sb.AppendLine($"  [{vis}] {f.Type.ToDisplayString()} {f.Name}");
                     break;
                 case IEventSymbol e:
-                    sb.AppendLine($"  [{vis}] event {e.Type.ToDisplayString()} {e.Name}{locStr}");
+                    sb.AppendLine($"  [{vis}] event {e.Type.ToDisplayString()} {e.Name}");
                     break;
             }
         }
 
         return sb.ToString().TrimEnd();
-    }
-
-    static IEnumerable<ISymbol> GetInheritedMembers(INamedTypeSymbol type)
-    {
-        var current = type.BaseType;
-        while (current is not null && current.SpecialType != SpecialType.System_Object)
-        {
-            foreach (var member in current.GetMembers().Where(m => !m.IsImplicitlyDeclared && m.CanBeReferencedByName))
-                yield return member;
-            current = current.BaseType;
-        }
     }
 
     static string FormatType(INamedTypeSymbol type)
