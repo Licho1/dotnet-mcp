@@ -96,4 +96,47 @@ await Test($"Find Callers: {testMethod}", "find-callers", new()
     ["methodName"] = testMethod
 });
 
+// === File Watching Test ===
+
+if (isSelf)
+{
+    Console.WriteLine("\n=== File Watch: incremental update test ===");
+
+    // Create a temp .cs file in the project directory
+    var projectDir = Path.GetDirectoryName(serverPath)!;
+    var tempFile = Path.Combine(projectDir, "TestWatchTarget.cs");
+
+    try
+    {
+        // Write a class, wait for watcher to pick it up, then query
+        File.WriteAllText(tempFile, "namespace DotnetMcp; public class TestWatchTarget { public void OriginalMethod() { } }");
+        Console.WriteLine("  Wrote TestWatchTarget.cs with OriginalMethod");
+        await Task.Delay(500); // let watcher fire
+
+        // This will trigger a structural reload (new file created)
+        await Test("Find TestWatchTarget (after create)", "get-source", new() { ["symbolName"] = "TestWatchTarget" });
+
+        // Now modify the file content (incremental update path)
+        File.WriteAllText(tempFile, "namespace DotnetMcp; public class TestWatchTarget { public void ModifiedMethod() { } }");
+        Console.WriteLine("\n  Modified TestWatchTarget.cs: OriginalMethod → ModifiedMethod");
+        await Task.Delay(500);
+
+        await Test("Find TestWatchTarget (after modify)", "get-source", new() { ["symbolName"] = "TestWatchTarget" });
+
+        // Rapid saves test
+        Console.WriteLine("\n  Rapid-saving TestWatchTarget.cs 5 times...");
+        for (var i = 0; i < 5; i++)
+            File.WriteAllText(tempFile, $"namespace DotnetMcp; public class TestWatchTarget {{ public void Version{i}() {{ }} }}");
+        await Task.Delay(500);
+
+        await Test("Find TestWatchTarget (after rapid saves)", "get-source", new() { ["symbolName"] = "TestWatchTarget" });
+    }
+    finally
+    {
+        if (File.Exists(tempFile))
+            File.Delete(tempFile);
+        Console.WriteLine("\n  Cleaned up TestWatchTarget.cs");
+    }
+}
+
 Console.WriteLine("\n\nAll tests completed!");

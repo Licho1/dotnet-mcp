@@ -64,7 +64,7 @@ public class SourceResolutionService(WorkspaceService workspace)
         var assembly = symbol.ContainingAssembly;
         if (assembly is null) return null;
 
-        var sln = workspace.GetSolution();
+        var sln = workspace.GetSolution(); // Sync access OK — freshness handled by tool-level GetSolutionAsync calls
         foreach (var project in sln.Projects)
         foreach (var reference in project.MetadataReferences.OfType<PortableExecutableReference>())
         {

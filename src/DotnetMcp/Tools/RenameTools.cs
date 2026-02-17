@@ -86,14 +86,7 @@ public static class RenameTools
             }
         }
 
-        // Reload the solution to pick up changes
-        if (workspace.LoadedPath is not null)
-        {
-            if (workspace.LoadedPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
-                await workspace.LoadSolutionAsync(workspace.LoadedPath, ct);
-            else
-                await workspace.LoadProjectAsync(workspace.LoadedPath, ct);
-        }
+        // File watchers will detect the changes and update the solution on next query
 
         var result = new StringBuilder();
         result.AppendLine($"Renamed '{symbolName}' → '{newName}'");

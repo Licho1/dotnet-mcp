@@ -1,9 +1,11 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Xml.Linq;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.Text;
 
 namespace DotnetMcp.Services;
 
@@ -17,6 +19,12 @@ public class WorkspaceService : IDisposable
     MSBuildWorkspace? workspace;
     Solution? solution;
     string? loadedSolutionPath;
+
+    // File watching
+    readonly List<FileSystemWatcher> watchers = [];
+    readonly ConcurrentDictionary<string, byte> pendingFileUpdates = new(StringComparer.OrdinalIgnoreCase);
+    volatile bool structuralChangeDetected;
+    readonly Lock syncLock = new();
 
     public bool IsLoaded => solution is not null;
     public string? LoadedPath => loadedSolutionPath;
@@ -36,6 +44,7 @@ public class WorkspaceService : IDisposable
 
         solution = await workspace.OpenSolutionAsync(solutionPath, cancellationToken: ct);
         loadedSolutionPath = solutionPath;
+        StartWatching();
 
         var projectNames = solution.Projects.Select(p => p.Name).ToList();
         return $"Loaded {solutionPath} with {projectNames.Count} projects: {string.Join(", ", projectNames)}";
@@ -77,6 +86,7 @@ public class WorkspaceService : IDisposable
 
         solution = workspace.CurrentSolution;
         loadedSolutionPath = slnxPath;
+        StartWatching();
 
         var projectNames = solution.Projects.Select(p => p.Name).ToList();
         return $"Loaded {slnxPath} with {projectNames.Count} projects: {string.Join(", ", projectNames)}";
@@ -120,16 +130,36 @@ public class WorkspaceService : IDisposable
         var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: ct);
         solution = project.Solution;
         loadedSolutionPath = projectPath;
+        StartWatching();
 
         return $"Loaded project {project.Name} from {projectPath}";
     }
 
+    public async Task<Solution> GetSolutionAsync(CancellationToken ct = default)
+    {
+        if (solution is null)
+            throw new InvalidOperationException("No solution loaded. Use load-solution or load-project first.");
+
+        if (structuralChangeDetected)
+        {
+            await FullReloadAsync(ct);
+        }
+        else if (!pendingFileUpdates.IsEmpty)
+        {
+            lock (syncLock)
+                ApplyPendingUpdates();
+        }
+
+        return solution!;
+    }
+
+    /// <summary>Kept for call sites that don't need freshness (e.g. rename applies its own solution).</summary>
     public Solution GetSolution() =>
         solution ?? throw new InvalidOperationException("No solution loaded. Use load-solution or load-project first.");
 
     public async Task<IEnumerable<ISymbol>> FindSymbolsAsync(string name, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         var results = new List<ISymbol>();
 
         foreach (var project in sln.Projects)
@@ -145,7 +175,7 @@ public class WorkspaceService : IDisposable
     public async Task<IEnumerable<ISymbol>> FindSymbolsWithFilterAsync(
         string name, Func<string, bool> filter, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         var results = new List<ISymbol>();
 
         foreach (var project in sln.Projects)
@@ -160,27 +190,27 @@ public class WorkspaceService : IDisposable
 
     public async Task<IEnumerable<ReferencedSymbol>> FindReferencesAsync(ISymbol symbol, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         return await SymbolFinder.FindReferencesAsync(symbol, sln, ct);
     }
 
     public async Task<IEnumerable<INamedTypeSymbol>> FindDerivedTypesAsync(
         INamedTypeSymbol type, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         return await SymbolFinder.FindDerivedClassesAsync(type, sln, cancellationToken: ct);
     }
 
     public async Task<IEnumerable<INamedTypeSymbol>> FindImplementationsAsync(
         INamedTypeSymbol interfaceType, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         return await SymbolFinder.FindImplementationsAsync(interfaceType, sln, cancellationToken: ct);
     }
 
     public async Task<SemanticModel?> GetSemanticModelAsync(string filePath, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         filePath = Path.GetFullPath(filePath);
 
         var docId = sln.GetDocumentIdsWithFilePath(filePath).FirstOrDefault();
@@ -192,7 +222,7 @@ public class WorkspaceService : IDisposable
 
     public async Task<SyntaxTree?> GetSyntaxTreeAsync(string filePath, CancellationToken ct = default)
     {
-        var sln = GetSolution();
+        var sln = await GetSolutionAsync(ct);
         filePath = Path.GetFullPath(filePath);
 
         var docId = sln.GetDocumentIdsWithFilePath(filePath).FirstOrDefault();
@@ -202,8 +232,140 @@ public class WorkspaceService : IDisposable
         return doc is null ? null : await doc.GetSyntaxTreeAsync(ct);
     }
 
+    // --- File watching ---
+
+    void StartWatching()
+    {
+        StopWatching();
+        if (solution is null) return;
+
+        var dirs = solution.Projects
+            .Select(p => Path.GetDirectoryName(p.FilePath))
+            .Where(d => d is not null)
+            .Select(d => Path.GetFullPath(d!))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Also watch solution directory for .sln/.csproj changes
+        if (loadedSolutionPath is not null)
+        {
+            var slnDir = Path.GetDirectoryName(loadedSolutionPath);
+            if (slnDir is not null)
+                dirs.Add(Path.GetFullPath(slnDir));
+        }
+
+        foreach (var dir in dirs.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Directory.Exists(dir)) continue;
+
+            var watcher = new FileSystemWatcher(dir)
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName,
+                EnableRaisingEvents = true
+            };
+            watcher.Changed += OnFileChanged;
+            watcher.Created += OnFileChanged;
+            watcher.Deleted += OnFileChanged;
+            watcher.Renamed += OnFileRenamed;
+            watchers.Add(watcher);
+        }
+    }
+
+    void StopWatching()
+    {
+        foreach (var w in watchers)
+        {
+            w.EnableRaisingEvents = false;
+            w.Dispose();
+        }
+        watchers.Clear();
+        pendingFileUpdates.Clear();
+        structuralChangeDetected = false;
+    }
+
+    void OnFileChanged(object sender, FileSystemEventArgs e) => ClassifyChange(e.FullPath, e.ChangeType);
+    void OnFileRenamed(object sender, RenamedEventArgs e)
+    {
+        // A rename of a .cs file is structural (old doc gone, new doc appeared)
+        ClassifyChange(e.OldFullPath, WatcherChangeTypes.Deleted);
+        ClassifyChange(e.FullPath, WatcherChangeTypes.Created);
+    }
+
+    void ClassifyChange(string fullPath, WatcherChangeTypes changeType)
+    {
+        // Ignore bin/obj/.vs directories
+        if (fullPath.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+            fullPath.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+            fullPath.Contains($"{Path.DirectorySeparatorChar}.vs{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var ext = Path.GetExtension(fullPath);
+
+        // Structural changes: project/solution files, or files added/deleted
+        if (ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase) ||
+            ext.Equals(".sln", StringComparison.OrdinalIgnoreCase) ||
+            ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase) ||
+            ext.Equals(".slnf", StringComparison.OrdinalIgnoreCase) ||
+            changeType is WatcherChangeTypes.Created or WatcherChangeTypes.Deleted)
+        {
+            structuralChangeDetected = true;
+            return;
+        }
+
+        // Content change to a .cs file — can be applied incrementally
+        if (ext.Equals(".cs", StringComparison.OrdinalIgnoreCase) && changeType == WatcherChangeTypes.Changed)
+            pendingFileUpdates[fullPath] = 0;
+    }
+
+    void ApplyPendingUpdates()
+    {
+        if (solution is null) return;
+
+        var files = pendingFileUpdates.Keys.ToList();
+        pendingFileUpdates.Clear();
+
+        foreach (var filePath in files)
+        {
+            var docIds = solution.GetDocumentIdsWithFilePath(filePath);
+            if (docIds.IsEmpty) continue;
+
+            try
+            {
+                var text = SourceText.From(File.ReadAllText(filePath));
+                foreach (var docId in docIds)
+                    solution = solution.WithDocumentText(docId, text);
+            }
+            catch (IOException)
+            {
+                // File may be locked mid-write, will catch it next time
+            }
+        }
+    }
+
+    async Task FullReloadAsync(CancellationToken ct)
+    {
+        if (loadedSolutionPath is null) return;
+
+        var ext = Path.GetExtension(loadedSolutionPath);
+        var path = loadedSolutionPath;
+
+        // Reset so Load methods don't short-circuit with "already loaded"
+        loadedSolutionPath = null;
+        solution = null;
+
+        switch (ext.ToLowerInvariant())
+        {
+            case ".sln": await LoadSolutionAsync(path, ct); break;
+            case ".slnx": await LoadSlnxAsync(path, ct); break;
+            case ".slnf": await LoadSlnfAsync(path, ct); break;
+            default: await LoadProjectAsync(path, ct); break;
+        }
+    }
+
     public void Dispose()
     {
+        StopWatching();
         workspace?.Dispose();
     }
 }

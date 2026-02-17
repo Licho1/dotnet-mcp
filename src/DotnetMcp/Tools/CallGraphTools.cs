@@ -35,7 +35,7 @@ public static class CallGraphTools
 
         var refs = await workspace.FindReferencesAsync(target, ct);
         var limit = maxResults ?? 100;
-        var sln = workspace.GetSolution();
+        var sln = await workspace.GetSolutionAsync(ct);
 
         var sb = new StringBuilder();
         sb.AppendLine($"# Callers of {target.ContainingType?.Name}.{target.Name}");
