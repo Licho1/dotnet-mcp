@@ -217,6 +217,56 @@ public class WorkspaceService : IDisposable
         return await SymbolFinder.FindImplementationsAsync(interfaceType, sln, cancellationToken: ct);
     }
 
+    /// <summary>
+    /// Resolves a symbol at a given file:line:col. Supports both regular .cs documents
+    /// and source-generated .g.cs documents (Razor source generators).
+    /// </summary>
+    public async Task<ISymbol?> GetSymbolAtLocationAsync(string filePath, int line, int column, CancellationToken ct = default)
+    {
+        var sln = await GetSolutionAsync(ct);
+        filePath = Path.GetFullPath(filePath);
+
+        // Try regular documents first
+        var docId = sln.GetDocumentIdsWithFilePath(filePath).FirstOrDefault();
+        if (docId is not null)
+            return await GetSymbolFromDocumentAsync(sln.GetDocument(docId)!, line, column, ct);
+
+        // Fall back to source-generated documents (Razor .g.cs files)
+        foreach (var project in sln.Projects)
+        {
+            IEnumerable<SourceGeneratedDocument> genDocs;
+            try { genDocs = await project.GetSourceGeneratedDocumentsAsync(ct); }
+            catch { continue; }
+
+            foreach (var genDoc in genDocs)
+            {
+                if (!string.Equals(genDoc.FilePath, filePath, StringComparison.OrdinalIgnoreCase)) continue;
+                return await GetSymbolFromDocumentAsync(genDoc, line, column, ct);
+            }
+        }
+
+        return null;
+    }
+
+    static async Task<ISymbol?> GetSymbolFromDocumentAsync(Document doc, int line, int column, CancellationToken ct)
+    {
+        var model = await doc.GetSemanticModelAsync(ct);
+        var tree = await doc.GetSyntaxTreeAsync(ct);
+        if (model is null || tree is null) return null;
+
+        var text = await tree.GetTextAsync(ct);
+        if (line < 1 || line > text.Lines.Count) return null;
+
+        var position = text.Lines[line - 1].Start + (column - 1);
+        var root = await tree.GetRootAsync(ct);
+        var token = root.FindToken(position);
+        var node = token.Parent;
+        if (node is null) return null;
+
+        var info = model.GetSymbolInfo(node);
+        return info.Symbol ?? info.CandidateSymbols.FirstOrDefault() ?? model.GetDeclaredSymbol(node);
+    }
+
     public async Task<SemanticModel?> GetSemanticModelAsync(string filePath, CancellationToken ct = default)
     {
         var sln = await GetSolutionAsync(ct);

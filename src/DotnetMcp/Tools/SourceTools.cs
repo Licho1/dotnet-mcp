@@ -13,13 +13,14 @@ public static class SourceTools
         "Resolve a symbol and get its source code + metadata. Works for both local and library/framework code. " +
         "Resolves through: local source, SourceLink (downloads original from GitHub/etc), embedded PDB, or decompilation. " +
         "Returns symbol info (kind, type, location, containing type) plus source code. " +
-        "Look up by symbol name OR by file:line:col (useful for navigating to library code at a call site).")]
+        "Look up by symbol name OR by file:line:col (supports .cs and .cshtml files).")]
     public static async Task<string> GetSource(
         WorkspaceService workspace,
         SourceResolutionService resolver,
+        RazorSourceMapper razorMapper,
         [Description("Symbol name to get source for (use this OR filePath+line+column)")] string? symbolName = null,
         [Description("Optional: filter by symbol kind (class, method, property, field, interface)")] string? kind = null,
-        [Description("Full path to source file (use with line+column to resolve symbol at location)")] string? filePath = null,
+        [Description("Full path to source file (use with line+column to resolve symbol at location; supports .cs and .cshtml)")] string? filePath = null,
         [Description("Line number (1-based, use with filePath)")] int? line = null,
         [Description("Column number (1-based, use with filePath)")] int? column = null,
         CancellationToken ct = default)
@@ -28,7 +29,23 @@ public static class SourceTools
 
         if (filePath is not null && line is not null)
         {
-            symbol = await ResolveSymbolAtLocation(workspace, filePath, line.Value, column ?? 1, ct);
+            string lookupPath = filePath;
+            int lookupLine = line.Value;
+            int lookupCol = column ?? 1;
+
+            if (filePath.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase))
+            {
+                var sln = await workspace.GetSolutionAsync(ct);
+                await razorMapper.EnsureGeneratedFilesAsync(sln, ct);
+
+                var mapped = razorMapper.TryMapReverse(filePath, line.Value, column ?? 1);
+                if (mapped is null)
+                    return $"No Razor mapping found for {filePath}:{line}:{column ?? 1}. " +
+                           "Ensure the project has been built (or uses .NET 6+ Razor source generators).";
+                (lookupPath, lookupLine, lookupCol) = mapped.Value;
+            }
+
+            symbol = await workspace.GetSymbolAtLocationAsync(lookupPath, lookupLine, lookupCol, ct);
             if (symbol is null)
                 return $"No symbol found at {filePath}:{line}:{column ?? 1}";
         }
@@ -110,29 +127,6 @@ public static class SourceTools
         sb.Append(result.Source);
 
         return sb.ToString().TrimEnd();
-    }
-
-    static async Task<ISymbol?> ResolveSymbolAtLocation(
-        WorkspaceService workspace, string filePath, int line, int column, CancellationToken ct)
-    {
-        var semanticModel = await workspace.GetSemanticModelAsync(filePath, ct);
-        var syntaxTree = await workspace.GetSyntaxTreeAsync(filePath, ct);
-        if (semanticModel is null || syntaxTree is null) return null;
-
-        var root = await syntaxTree.GetRootAsync(ct);
-        var text = await syntaxTree.GetTextAsync(ct);
-
-        if (line < 1 || line > text.Lines.Count) return null;
-
-        var position = text.Lines[line - 1].Start + (column - 1);
-        var token = root.FindToken(position);
-        var node = token.Parent;
-        if (node is null) return null;
-
-        var symbolInfo = semanticModel.GetSymbolInfo(node);
-        return symbolInfo.Symbol
-            ?? symbolInfo.CandidateSymbols.FirstOrDefault()
-            ?? semanticModel.GetDeclaredSymbol(node);
     }
 
     static string GetKind(ISymbol symbol) => symbol switch

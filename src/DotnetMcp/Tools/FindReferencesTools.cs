@@ -11,36 +11,73 @@ public static class FindReferencesTools
 {
     [McpServerTool(Name = "find-references"), Description(
         "Find all references (usages) of a symbol across the entire solution. " +
-        "Returns file locations and surrounding context for each reference.")]
+        "Returns file locations and surrounding context for each reference. " +
+        "Accepts a symbol name OR a file:line:col (supports .cs and .cshtml files).")]
     public static async Task<string> FindReferences(
         WorkspaceService workspace,
         RazorSourceMapper razorMapper,
-        [Description("Symbol name to find references for")] string symbolName,
+        [Description("Symbol name to find references for (use this OR filePath+line+column)")] string? symbolName = null,
         [Description("Optional: filter by symbol kind (class, method, property, field, interface)")] string? kind = null,
         [Description("Optional: max number of references to return (default: 100)")] int? maxResults = null,
+        [Description("Full path to source file (use with line+column to resolve symbol at location; supports .cs and .cshtml)")] string? filePath = null,
+        [Description("Line number (1-based, use with filePath)")] int? line = null,
+        [Description("Column number (1-based, use with filePath)")] int? column = null,
         CancellationToken ct = default)
     {
-        var symbols = await workspace.FindSymbolsAsync(symbolName, ct);
+        ISymbol? target;
 
-        if (!string.IsNullOrEmpty(kind))
+        if (filePath is not null && line is not null)
         {
-            symbols = kind.ToLowerInvariant() switch
+            var sln = await workspace.GetSolutionAsync(ct);
+            await razorMapper.EnsureGeneratedFilesAsync(sln, ct);
+
+            string lookupPath = filePath;
+            int lookupLine = line.Value;
+            int lookupCol = column ?? 1;
+
+            // For .cshtml files, reverse-map to the generated .g.cs location
+            if (filePath.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase))
             {
-                "class" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Class }),
-                "interface" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Interface }),
-                "method" => symbols.Where(s => s is IMethodSymbol),
-                "property" => symbols.Where(s => s is IPropertySymbol),
-                "field" => symbols.Where(s => s is IFieldSymbol),
-                _ => symbols
-            };
+                var mapped = razorMapper.TryMapReverse(filePath, line.Value, column ?? 1);
+                if (mapped is null)
+                    return $"No Razor mapping found for {filePath}:{line}:{column ?? 1}. " +
+                           "Ensure the project has been built (or uses .NET 6+ Razor source generators).";
+                (lookupPath, lookupLine, lookupCol) = mapped.Value;
+            }
+
+            target = await workspace.GetSymbolAtLocationAsync(lookupPath, lookupLine, lookupCol, ct);
+            if (target is null)
+                return $"No symbol found at {filePath}:{line}:{column ?? 1}.";
+        }
+        else if (symbolName is not null)
+        {
+            var symbols = await workspace.FindSymbolsAsync(symbolName, ct);
+
+            if (!string.IsNullOrEmpty(kind))
+            {
+                symbols = kind.ToLowerInvariant() switch
+                {
+                    "class" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Class }),
+                    "interface" => symbols.Where(s => s is INamedTypeSymbol { TypeKind: TypeKind.Interface }),
+                    "method" => symbols.Where(s => s is IMethodSymbol),
+                    "property" => symbols.Where(s => s is IPropertySymbol),
+                    "field" => symbols.Where(s => s is IFieldSymbol),
+                    _ => symbols
+                };
+            }
+
+            target = symbols.FirstOrDefault();
+            if (target is null)
+                return $"No symbol found matching '{symbolName}'.";
+        }
+        else
+        {
+            return "Provide either 'symbolName' or 'filePath'+'line' to locate the symbol.";
         }
 
-        var target = symbols.FirstOrDefault();
-        if (target is null)
-            return $"No symbol found matching '{symbolName}'.";
-
-        var sln = await workspace.GetSolutionAsync(ct);
-        await razorMapper.EnsureGeneratedFilesAsync(sln, ct);
+        // EnsureGeneratedFilesAsync may have been called already (filePath branch) but it's idempotent
+        var sln2 = await workspace.GetSolutionAsync(ct);
+        await razorMapper.EnsureGeneratedFilesAsync(sln2, ct);
 
         var refs = await workspace.FindReferencesAsync(target, ct);
         var limit = maxResults ?? 100;
@@ -63,14 +100,14 @@ public static class FindReferencesTools
                 }
 
                 var span = location.Location.GetLineSpan();
-                var filePath = span.Path;
-                var line = span.StartLinePosition.Line + 1;
+                var refFilePath = span.Path;
+                var refLine = span.StartLinePosition.Line + 1;
                 var col = span.StartLinePosition.Character + 1;
 
                 // If this reference is in a generated Razor .g.cs file, map it back to .cshtml
-                if (RazorSourceMapper.IsGeneratedFile(filePath))
+                if (RazorSourceMapper.IsGeneratedFile(refFilePath))
                 {
-                    var mapped = razorMapper.TryMap(filePath, line);
+                    var mapped = razorMapper.TryMap(refFilePath, refLine);
                     if (mapped is not null)
                     {
                         sb.AppendLine($"  {mapped.Value.cshtmlPath}:{mapped.Value.cshtmlLine}   [Razor]");
@@ -80,7 +117,7 @@ public static class FindReferencesTools
                     }
                 }
 
-                sb.AppendLine($"  {filePath}:{line}:{col}");
+                sb.AppendLine($"  {refFilePath}:{refLine}:{col}");
                 total++;
             }
         }
@@ -88,7 +125,7 @@ public static class FindReferencesTools
         // Fallback: text search in .cshtml files when no .g.cs mapping found
         if (razorTotal == 0)
         {
-            var projectDirs = sln.Projects
+            var projectDirs = sln2.Projects
                 .Where(p => p.FilePath is not null)
                 .Select(p => Path.GetDirectoryName(p.FilePath)!)
                 .Distinct(StringComparer.OrdinalIgnoreCase);

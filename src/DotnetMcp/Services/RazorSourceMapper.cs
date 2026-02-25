@@ -31,6 +31,41 @@ public class RazorSourceMapper
          filePath.Contains("\\obj\\", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// Given a location in an original .cshtml file, tries to find the corresponding
+    /// location in a generated .g.cs file. Returns null if no mapping is found.
+    /// Call EnsureGeneratedFilesAsync first to populate the cache.
+    /// </summary>
+    public (string gcsPath, int gcsLine, int gcsCol)? TryMapReverse(string cshtmlPath, int cshtmlLine, int cshtmlCol = 1)
+    {
+        cshtmlPath = Path.GetFullPath(cshtmlPath);
+
+        foreach (var (gcsPath, mappings) in _mappingCache)
+        {
+            LineMappingEntry? best = null;
+            foreach (var entry in mappings)
+            {
+                if (string.IsNullOrEmpty(entry.SourceFile)) continue;
+
+                var resolved = ResolveCshtmlPath(entry.SourceFile, gcsPath);
+                if (resolved is null) continue;
+                if (!string.Equals(resolved, cshtmlPath, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Keep entry with highest SourceLine that is still <= cshtmlLine
+                if (entry.SourceLine <= cshtmlLine && (best is null || entry.SourceLine > best.SourceLine))
+                    best = entry;
+            }
+
+            if (best is null) continue;
+
+            // Inverse of TryMap: gcsLine = best.GeneratedLine + 1 + (cshtmlLine - best.SourceLine)
+            var gcsLine = best.GeneratedLine + 1 + (cshtmlLine - best.SourceLine);
+            return (gcsPath, gcsLine, best.SourceCol);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Given a location in a .g.cs file (real or synthetic), tries to map it to
     /// the original .cshtml file location. Returns null if no mapping is found.
     /// </summary>
