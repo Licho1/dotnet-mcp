@@ -10,15 +10,18 @@ public class RazorSourceMapper
     record LineMappingEntry(int GeneratedLine, string SourceFile, int SourceLine, int SourceCol = 1);
 
     readonly ConcurrentDictionary<string, List<LineMappingEntry>> _mappingCache = new(StringComparer.OrdinalIgnoreCase);
-    readonly HashSet<string> _builtProjects = new(StringComparer.OrdinalIgnoreCase);
+    // Use ConcurrentDictionary as a thread-safe set to guard against concurrent EnsureGeneratedFilesAsync calls
+    readonly ConcurrentDictionary<string, byte> _builtProjects = new(StringComparer.OrdinalIgnoreCase);
 
     static readonly Regex OldLineDirective = new(@"^\s*#line\s+(\d+)\s+""([^""]+)""", RegexOptions.Compiled);
     static readonly Regex NewLineDirective = new(@"^\s*#line\s+\((\d+),(\d+)\)-\(\d+,\d+\)\s+\d+\s+""([^""]+)""", RegexOptions.Compiled);
     static readonly Regex HiddenOrDefault = new(@"^\s*#line\s+(hidden|default)\b", RegexOptions.Compiled);
 
+    // Match both separator styles: Roslyn often uses forward slashes even on Windows
     public static bool IsGeneratedFile(string filePath) =>
         filePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) &&
-        filePath.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
+        (filePath.Contains("/obj/", StringComparison.OrdinalIgnoreCase) ||
+         filePath.Contains("\\obj\\", StringComparison.OrdinalIgnoreCase));
 
     public (string cshtmlPath, int cshtmlLine, int cshtmlCol)? TryMap(string generatedFilePath, int refLine)
     {
@@ -34,8 +37,9 @@ public class RazorSourceMapper
         if (last is null || string.IsNullOrEmpty(last.SourceFile))
             return null;
 
+        // The #line directive at GeneratedLine means "next line = SourceLine", so the offset is (refLine - GeneratedLine - 1)
         var sourceLine = last.SourceLine + (refLine - last.GeneratedLine - 1);
-        if (sourceLine < 1) sourceLine = last.SourceLine;
+        if (sourceLine < 1) sourceLine = 1;
 
         var cshtmlPath = ResolveCshtmlPath(last.SourceFile, generatedFilePath);
         return cshtmlPath is null ? null : (cshtmlPath, sourceLine, last.SourceCol);
@@ -47,7 +51,19 @@ public class RazorSourceMapper
         {
             var objDir = Path.Combine(dir, "obj");
             if (!Directory.Exists(objDir)) continue;
-            foreach (var file in Directory.EnumerateFiles(objDir, "*.g.cs", SearchOption.AllDirectories))
+
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(objDir, "*.g.cs", new EnumerationOptions
+                {
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = true
+                });
+            }
+            catch (UnauthorizedAccessException) { continue; }
+
+            foreach (var file in files)
             {
                 if (ContainsCshtmlMappings(file))
                     yield return file;
@@ -61,10 +77,19 @@ public class RazorSourceMapper
         {
             if (project.FilePath is null) continue;
             var projectDir = Path.GetDirectoryName(project.FilePath)!;
-            if (_builtProjects.Contains(projectDir)) continue;
-            _builtProjects.Add(projectDir);
+            if (!_builtProjects.TryAdd(projectDir, 0)) continue; // already checked
 
-            var hasCshtml = Directory.EnumerateFiles(projectDir, "*.cshtml", SearchOption.AllDirectories).Any();
+            bool hasCshtml;
+            try
+            {
+                hasCshtml = Directory.EnumerateFiles(projectDir, "*.cshtml", new EnumerationOptions
+                {
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = true
+                }).Any();
+            }
+            catch (UnauthorizedAccessException) { continue; }
+
             if (!hasCshtml) continue;
 
             var hasGeneratedFiles = FindGeneratedRazorFiles([projectDir]).Any();
@@ -78,7 +103,18 @@ public class RazorSourceMapper
     {
         foreach (var dir in projectDirs)
         {
-            foreach (var cshtml in Directory.EnumerateFiles(dir, "*.cshtml", SearchOption.AllDirectories))
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(dir, "*.cshtml", new EnumerationOptions
+                {
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = true
+                });
+            }
+            catch (UnauthorizedAccessException) { continue; }
+
+            foreach (var cshtml in files)
             {
                 var lineNum = 0;
                 foreach (var text in File.ReadLines(cshtml))
@@ -176,9 +212,18 @@ public class RazorSourceMapper
         try
         {
             using var proc = Process.Start(psi)!;
-            await proc.WaitForExitAsync(ct);
-            _mappingCache.Clear();
+            try
+            {
+                await proc.WaitForExitAsync(ct);
+                _mappingCache.Clear();
+            }
+            catch (OperationCanceledException)
+            {
+                proc.Kill(entireProcessTree: true);
+                throw;
+            }
         }
+        catch (OperationCanceledException) { throw; }
         catch { }
     }
 }
