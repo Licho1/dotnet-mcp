@@ -234,7 +234,7 @@ public class RazorSourceMapper
     }
 
     static string[] GetLines(string text) =>
-        text.Split(['\r', '\n'], StringSplitOptions.None);
+        text.ReplaceLineEndings("\n").Split('\n');
 
     static bool ContainsCshtmlMappings(string filePath)
     {
