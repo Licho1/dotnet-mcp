@@ -224,14 +224,16 @@ public class WorkspaceService : IDisposable
     public async Task<ISymbol?> GetSymbolAtLocationAsync(string filePath, int line, int column, CancellationToken ct = default)
     {
         var sln = await GetSolutionAsync(ct);
-        filePath = Path.GetFullPath(filePath);
+        var normalizedPath = Path.GetFullPath(filePath);
 
-        // Try regular documents first
-        var docId = sln.GetDocumentIdsWithFilePath(filePath).FirstOrDefault();
+        // Try regular documents first (normalized path works well here)
+        var docId = sln.GetDocumentIdsWithFilePath(normalizedPath).FirstOrDefault();
         if (docId is not null)
             return await GetSymbolFromDocumentAsync(sln.GetDocument(docId)!, line, column, ct);
 
-        // Fall back to source-generated documents (Razor .g.cs files)
+        // Fall back to source-generated documents (Razor .g.cs files).
+        // Roslyn may store FilePath with forward slashes on Windows, so compare
+        // the original path string too, not just the normalized (backslash) form.
         foreach (var project in sln.Projects)
         {
             IEnumerable<SourceGeneratedDocument> genDocs;
@@ -240,7 +242,11 @@ public class WorkspaceService : IDisposable
 
             foreach (var genDoc in genDocs)
             {
-                if (!string.Equals(genDoc.FilePath, filePath, StringComparison.OrdinalIgnoreCase)) continue;
+                var gfp = genDoc.FilePath;
+                if (gfp is null) continue;
+                if (!string.Equals(gfp, normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(gfp, filePath, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 return await GetSymbolFromDocumentAsync(genDoc, line, column, ct);
             }
         }

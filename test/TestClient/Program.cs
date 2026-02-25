@@ -144,7 +144,7 @@ if (isSelf)
 
 if (!isSelf)
 {
-    Console.WriteLine("\n=== Razor (.cshtml) Reference Check ===");
+    Console.WriteLine("\n=== Razor (.cshtml) Reference Check (by symbol name) ===");
     var result = await client.CallToolAsync("find-references", new Dictionary<string, object?>
     {
         ["symbolName"] = testType
@@ -165,6 +165,36 @@ if (!isSelf)
         Console.WriteLine(text);
     }
     Console.ResetColor();
+
+    // === NEW: find-references from a .cshtml file:line:col ===
+    // Find any .cshtml reference from the previous result and use it to test the reverse lookup
+    var cshtmlRef = cshtmlRefs.FirstOrDefault(l => l.Contains(".cshtml:"));
+    if (cshtmlRef is not null)
+    {
+        // Parse "  /path/to/File.cshtml:LINE   [Razor]" → path + line
+        var trimmed = cshtmlRef.Trim();
+        var parts = trimmed.Split(':');
+        if (parts.Length >= 2 && int.TryParse(parts[^1].Split(' ')[0].Split('\t')[0].Trim(), out var cshtmlLine))
+        {
+            // Reconstruct path (handle Windows drive letter like C:)
+            var cshtmlPath = string.Join(":", parts[..^1]).Trim();
+            Console.WriteLine($"\n=== find-references from cshtml file:line ({cshtmlPath}:{cshtmlLine}) ===");
+            await Test("find-references (from .cshtml file:line)", "find-references", new()
+            {
+                ["filePath"] = cshtmlPath,
+                ["line"] = cshtmlLine,
+                ["column"] = 1
+            });
+
+            Console.WriteLine($"\n=== get-source from cshtml file:line ({cshtmlPath}:{cshtmlLine}) ===");
+            await Test("get-source (from .cshtml file:line)", "get-source", new()
+            {
+                ["filePath"] = cshtmlPath,
+                ["line"] = cshtmlLine,
+                ["column"] = 1
+            });
+        }
+    }
 }
 
 Console.WriteLine("\n\nAll tests completed!");
