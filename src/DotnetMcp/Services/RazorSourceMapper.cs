@@ -5,10 +5,17 @@ using Microsoft.CodeAnalysis;
 
 namespace DotnetMcp.Services;
 
+/// <summary>
+/// Maps symbol reference locations in Razor-generated .g.cs files back to their
+/// original .cshtml source locations using #line directives.
+/// Supports both old-style physical .g.cs files (pre-.NET 6) and new-style
+/// in-memory Roslyn Source Generator documents (.NET 6+).
+/// </summary>
 public class RazorSourceMapper
 {
     record LineMappingEntry(int GeneratedLine, string SourceFile, int SourceLine, int SourceCol = 1);
 
+    // Cache parsed mappings per generated file path (synthetic or real)
     readonly ConcurrentDictionary<string, List<LineMappingEntry>> _mappingCache = new(StringComparer.OrdinalIgnoreCase);
     // Use ConcurrentDictionary as a thread-safe set to guard against concurrent EnsureGeneratedFilesAsync calls
     readonly ConcurrentDictionary<string, byte> _builtProjects = new(StringComparer.OrdinalIgnoreCase);
@@ -23,6 +30,10 @@ public class RazorSourceMapper
         (filePath.Contains("/obj/", StringComparison.OrdinalIgnoreCase) ||
          filePath.Contains("\\obj\\", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Given a location in a .g.cs file (real or synthetic), tries to map it to
+    /// the original .cshtml file location. Returns null if no mapping is found.
+    /// </summary>
     public (string cshtmlPath, int cshtmlLine, int cshtmlCol)? TryMap(string generatedFilePath, int refLine)
     {
         var mappings = GetOrParseMappings(generatedFilePath);
@@ -45,6 +56,47 @@ public class RazorSourceMapper
         return cshtmlPath is null ? null : (cshtmlPath, sourceLine, last.SourceCol);
     }
 
+    /// <summary>
+    /// Ensures the mapping cache is populated for all Razor projects in the solution.
+    /// For .NET 6+ projects: populates from in-memory source-generated documents.
+    /// For older projects: triggers dotnet build if no physical .g.cs files exist.
+    /// </summary>
+    public async Task EnsureGeneratedFilesAsync(Solution solution, CancellationToken ct = default)
+    {
+        // Primary path: populate from Roslyn Source Generator documents (in-memory, .NET 6+)
+        await PopulateFromSourceGeneratorsAsync(solution, ct);
+
+        // Fallback path: for old-style projects, trigger a build if no .g.cs files found
+        foreach (var project in solution.Projects)
+        {
+            if (project.FilePath is null) continue;
+            var projectDir = Path.GetDirectoryName(project.FilePath)!;
+            if (!_builtProjects.TryAdd(projectDir, 0)) continue;
+
+            bool hasCshtml;
+            try
+            {
+                hasCshtml = Directory.EnumerateFiles(projectDir, "*.cshtml", new EnumerationOptions
+                {
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = true
+                }).Any();
+            }
+            catch (UnauthorizedAccessException) { continue; }
+
+            if (!hasCshtml) continue;
+
+            // If source-generator population already found cshtml mappings for this project, skip the build
+            var objDir = Path.Combine(projectDir, "obj");
+            var hasMappings = _mappingCache.Any(kv =>
+                kv.Key.StartsWith(objDir, StringComparison.OrdinalIgnoreCase) &&
+                kv.Value.Any(m => !string.IsNullOrEmpty(m.SourceFile)));
+            if (!hasMappings && !FindGeneratedRazorFiles([projectDir]).Any())
+                await TriggerBuildAsync(project.FilePath, ct);
+        }
+    }
+
+    /// <summary>Returns all physical .g.cs files under obj/ directories that contain cshtml mappings.</summary>
     public IEnumerable<string> FindGeneratedRazorFiles(IEnumerable<string> projectDirs)
     {
         foreach (var dir in projectDirs)
@@ -71,33 +123,10 @@ public class RazorSourceMapper
         }
     }
 
-    public async Task EnsureGeneratedFilesAsync(Solution solution, CancellationToken ct = default)
-    {
-        foreach (var project in solution.Projects)
-        {
-            if (project.FilePath is null) continue;
-            var projectDir = Path.GetDirectoryName(project.FilePath)!;
-            if (!_builtProjects.TryAdd(projectDir, 0)) continue; // already checked
-
-            bool hasCshtml;
-            try
-            {
-                hasCshtml = Directory.EnumerateFiles(projectDir, "*.cshtml", new EnumerationOptions
-                {
-                    RecurseSubdirectories = true,
-                    IgnoreInaccessible = true
-                }).Any();
-            }
-            catch (UnauthorizedAccessException) { continue; }
-
-            if (!hasCshtml) continue;
-
-            var hasGeneratedFiles = FindGeneratedRazorFiles([projectDir]).Any();
-            if (!hasGeneratedFiles)
-                await TriggerBuildAsync(project.FilePath, ct);
-        }
-    }
-
+    /// <summary>
+    /// Text-search .cshtml files for the given symbol name.
+    /// Used as a last-resort fallback when .g.cs mapping is unavailable.
+    /// </summary>
     public IEnumerable<(string filePath, int line)> TextSearchCshtml(
         IEnumerable<string> projectDirs, string symbolSimpleName)
     {
@@ -127,42 +156,85 @@ public class RazorSourceMapper
         }
     }
 
-    List<LineMappingEntry> GetOrParseMappings(string generatedFilePath) =>
-        _mappingCache.GetOrAdd(generatedFilePath, ParseMappings);
+    // --- Source Generator support ---
 
-    static List<LineMappingEntry> ParseMappings(string generatedFilePath)
+    /// <summary>
+    /// Populates the mapping cache from in-memory Roslyn source-generated documents.
+    /// This is the primary path for .NET 6+ projects using the Razor Source Generator.
+    /// </summary>
+    async Task PopulateFromSourceGeneratorsAsync(Solution solution, CancellationToken ct)
+    {
+        foreach (var project in solution.Projects)
+        {
+            try
+            {
+                var generatedDocs = await project.GetSourceGeneratedDocumentsAsync(ct);
+                foreach (var doc in generatedDocs)
+                {
+                    if (doc.FilePath is null) continue;
+                    if (!doc.FilePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (_mappingCache.ContainsKey(doc.FilePath)) continue;
+
+                    var text = await doc.GetTextAsync(ct);
+                    var mappings = ParseMappingsFromLines(doc.FilePath, GetLines(text.ToString()));
+                    if (mappings.Any(m => !string.IsNullOrEmpty(m.SourceFile)))
+                        _mappingCache.TryAdd(doc.FilePath, mappings);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* source generator errors are non-fatal */ }
+        }
+    }
+
+    // --- Private helpers ---
+
+    List<LineMappingEntry> GetOrParseMappings(string generatedFilePath)
+    {
+        if (_mappingCache.TryGetValue(generatedFilePath, out var cached))
+            return cached;
+
+        // Try reading from disk (old-style physical .g.cs files)
+        return _mappingCache.GetOrAdd(generatedFilePath, path =>
+        {
+            try { return ParseMappingsFromLines(path, File.ReadAllLines(path)); }
+            catch { return []; }
+        });
+    }
+
+    static List<LineMappingEntry> ParseMappingsFromLines(string filePath, string[] lines)
     {
         var mappings = new List<LineMappingEntry>();
-        try
+        for (var i = 0; i < lines.Length; i++)
         {
-            var lines = File.ReadAllLines(generatedFilePath);
-            for (var i = 0; i < lines.Length; i++)
+            var line = lines[i];
+
+            // Enhanced format: #line (row,col)-(row,col) N "file.cshtml"
+            var m = NewLineDirective.Match(line);
+            if (m.Success)
             {
-                var line = lines[i];
-
-                var m = NewLineDirective.Match(line);
-                if (m.Success)
-                {
-                    if (!m.Groups[3].Value.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase)) continue;
-                    mappings.Add(new(i + 1, m.Groups[3].Value, int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value)));
-                    continue;
-                }
-
-                m = OldLineDirective.Match(line);
-                if (m.Success)
-                {
-                    if (!m.Groups[2].Value.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase)) continue;
-                    mappings.Add(new(i + 1, m.Groups[2].Value, int.Parse(m.Groups[1].Value)));
-                    continue;
-                }
-
-                if (HiddenOrDefault.IsMatch(line))
-                    mappings.Add(new(i + 1, "", 0));
+                if (!m.Groups[3].Value.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase)) continue;
+                mappings.Add(new(i + 1, m.Groups[3].Value, int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value)));
+                continue;
             }
+
+            // Classic format: #line N "file.cshtml"
+            m = OldLineDirective.Match(line);
+            if (m.Success)
+            {
+                if (!m.Groups[2].Value.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase)) continue;
+                mappings.Add(new(i + 1, m.Groups[2].Value, int.Parse(m.Groups[1].Value)));
+                continue;
+            }
+
+            // #line hidden / #line default — clears active mapping
+            if (HiddenOrDefault.IsMatch(line))
+                mappings.Add(new(i + 1, "", 0));
         }
-        catch (IOException) { }
         return mappings;
     }
+
+    static string[] GetLines(string text) =>
+        text.Split(['\r', '\n'], StringSplitOptions.None);
 
     static bool ContainsCshtmlMappings(string filePath)
     {
