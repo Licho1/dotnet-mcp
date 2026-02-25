@@ -14,6 +14,7 @@ public static class FindReferencesTools
         "Returns file locations and surrounding context for each reference.")]
     public static async Task<string> FindReferences(
         WorkspaceService workspace,
+        RazorSourceMapper razorMapper,
         [Description("Symbol name to find references for")] string symbolName,
         [Description("Optional: filter by symbol kind (class, method, property, field, interface)")] string? kind = null,
         [Description("Optional: max number of references to return (default: 100)")] int? maxResults = null,
@@ -38,6 +39,8 @@ public static class FindReferencesTools
         if (target is null)
             return $"No symbol found matching '{symbolName}'.";
 
+        await razorMapper.EnsureGeneratedFilesAsync(await workspace.GetSolutionAsync(ct), ct);
+
         var refs = await workspace.FindReferencesAsync(target, ct);
         var limit = maxResults ?? 100;
 
@@ -46,6 +49,7 @@ public static class FindReferencesTools
         sb.AppendLine();
 
         var total = 0;
+        var razorTotal = 0;
         foreach (var refSymbol in refs)
         {
             foreach (var location in refSymbol.Locations)
@@ -61,15 +65,49 @@ public static class FindReferencesTools
                 var line = span.StartLinePosition.Line + 1;
                 var col = span.StartLinePosition.Character + 1;
 
+                // If this reference is in a generated Razor .g.cs file, map it back to .cshtml
+                if (RazorSourceMapper.IsGeneratedFile(filePath))
+                {
+                    var mapped = razorMapper.TryMap(filePath, line);
+                    if (mapped is not null)
+                    {
+                        sb.AppendLine($"  {mapped.Value.cshtmlPath}:{mapped.Value.cshtmlLine}   [Razor]");
+                        total++;
+                        razorTotal++;
+                        continue;
+                    }
+                }
+
                 sb.AppendLine($"  {filePath}:{line}:{col}");
                 total++;
+            }
+        }
+
+        // Fallback: text search in .cshtml files when no .g.cs mapping found
+        if (razorTotal == 0)
+        {
+            var sln2 = await workspace.GetSolutionAsync(ct);
+            var projectDirs = sln2.Projects
+                .Where(p => p.FilePath is not null)
+                .Select(p => Path.GetDirectoryName(p.FilePath)!)
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (cshtmlPath, cshtmlLine) in razorMapper.TextSearchCshtml(projectDirs, target.Name))
+            {
+                if (total >= limit) break;
+                sb.AppendLine($"  {cshtmlPath}:{cshtmlLine}   [Razor/text]");
+                total++;
+                razorTotal++;
             }
         }
 
         if (total == 0)
             sb.AppendLine("  (no references found)");
         else
-            sb.AppendLine($"\nTotal: {total} references");
+        {
+            var suffix = razorTotal > 0 ? $" ({razorTotal} Razor)" : "";
+            sb.AppendLine($"\nTotal: {total} references{suffix}");
+        }
 
         return sb.ToString().TrimEnd();
     }
