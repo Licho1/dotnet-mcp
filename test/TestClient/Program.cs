@@ -51,8 +51,8 @@ var isSelf = loadPath == serverPath;
 await Test("Load", "load", new() { ["path"] = loadPath });
 
 // Use different symbol names depending on what we loaded
-var testType = isSelf ? "WorkspaceService" : "CsvTable";
-var testMethod = isSelf ? "LoadSolutionAsync" : "ParseCsvLine";
+var testType = isSelf ? "WorkspaceService" : (args.Length > 1 ? args[1] : "CsvTable");
+var testMethod = isSelf ? "LoadSolutionAsync" : (args.Length > 2 ? args[2] : "ParseCsvLine");
 
 // === Type Hierarchy ===
 
@@ -136,6 +136,64 @@ if (isSelf)
         if (File.Exists(tempFile))
             File.Delete(tempFile);
         Console.WriteLine("\n  Cleaned up TestWatchTarget.cs");
+    }
+}
+
+// === Razor (.cshtml) Reference Test ===
+// When testing against a Razor project, verify that find-references returns .cshtml locations.
+
+if (!isSelf)
+{
+    Console.WriteLine("\n=== Razor (.cshtml) Reference Check (by symbol name) ===");
+    var result = await client.CallToolAsync("find-references", new Dictionary<string, object?>
+    {
+        ["symbolName"] = testType
+    });
+    var text = GetText(result);
+    var cshtmlRefs = text.Split('\n').Where(l => l.Contains(".cshtml")).ToList();
+    if (cshtmlRefs.Count > 0)
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"✓ Found {cshtmlRefs.Count} .cshtml reference(s):");
+        foreach (var r in cshtmlRefs)
+            Console.WriteLine(r);
+    }
+    else
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("⚠ No .cshtml references found (symbol may not be used in Razor views)");
+        Console.WriteLine(text);
+    }
+    Console.ResetColor();
+
+    // === NEW: find-references from a .cshtml file:line:col ===
+    // Find any .cshtml reference from the previous result and use it to test the reverse lookup
+    var cshtmlRef = cshtmlRefs.FirstOrDefault(l => l.Contains(".cshtml:"));
+    if (cshtmlRef is not null)
+    {
+        // Parse "  /path/to/File.cshtml:LINE   [Razor]" → path + line
+        var trimmed = cshtmlRef.Trim();
+        var parts = trimmed.Split(':');
+        if (parts.Length >= 2 && int.TryParse(parts[^1].Split(' ')[0].Split('\t')[0].Trim(), out var cshtmlLine))
+        {
+            // Reconstruct path (handle Windows drive letter like C:)
+            var cshtmlPath = string.Join(":", parts[..^1]).Trim();
+            Console.WriteLine($"\n=== find-references from cshtml file:line ({cshtmlPath}:{cshtmlLine}) ===");
+            await Test("find-references (from .cshtml file:line)", "find-references", new()
+            {
+                ["filePath"] = cshtmlPath,
+                ["line"] = cshtmlLine,
+                ["column"] = 1
+            });
+
+            Console.WriteLine($"\n=== get-source from cshtml file:line ({cshtmlPath}:{cshtmlLine}) ===");
+            await Test("get-source (from .cshtml file:line)", "get-source", new()
+            {
+                ["filePath"] = cshtmlPath,
+                ["line"] = cshtmlLine,
+                ["column"] = 1
+            });
+        }
     }
 }
 

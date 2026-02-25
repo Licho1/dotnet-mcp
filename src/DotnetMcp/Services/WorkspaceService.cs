@@ -138,7 +138,15 @@ public class WorkspaceService : IDisposable
     public async Task<Solution> GetSolutionAsync(CancellationToken ct = default)
     {
         if (solution is null)
-            throw new InvalidOperationException("No solution loaded. Use load-solution or load-project first.");
+            await TryAutoLoadAsync(ct);
+
+        if (solution is null)
+        {
+            var cwd = Directory.GetCurrentDirectory();
+            throw new InvalidOperationException(
+                $"No solution loaded and no .sln/.slnx/.slnf/.csproj found in '{cwd}'. " +
+                "Call the 'load' tool with a path to a solution or project file.");
+        }
 
         if (structuralChangeDetected)
         {
@@ -155,7 +163,8 @@ public class WorkspaceService : IDisposable
 
     /// <summary>Kept for call sites that don't need freshness (e.g. rename applies its own solution).</summary>
     public Solution GetSolution() =>
-        solution ?? throw new InvalidOperationException("No solution loaded. Use load-solution or load-project first.");
+        solution ?? throw new InvalidOperationException(
+            "No solution loaded. Call the 'load' tool with a path to a .sln, .slnx, .slnf, or .csproj file.");
 
     public async Task<IEnumerable<ISymbol>> FindSymbolsAsync(string name, CancellationToken ct = default)
     {
@@ -208,6 +217,62 @@ public class WorkspaceService : IDisposable
         return await SymbolFinder.FindImplementationsAsync(interfaceType, sln, cancellationToken: ct);
     }
 
+    /// <summary>
+    /// Resolves a symbol at a given file:line:col. Supports both regular .cs documents
+    /// and source-generated .g.cs documents (Razor source generators).
+    /// </summary>
+    public async Task<ISymbol?> GetSymbolAtLocationAsync(string filePath, int line, int column, CancellationToken ct = default)
+    {
+        var sln = await GetSolutionAsync(ct);
+        var normalizedPath = Path.GetFullPath(filePath);
+
+        // Try regular documents first (normalized path works well here)
+        var docId = sln.GetDocumentIdsWithFilePath(normalizedPath).FirstOrDefault();
+        if (docId is not null)
+            return await GetSymbolFromDocumentAsync(sln.GetDocument(docId)!, line, column, ct);
+
+        // Fall back to source-generated documents (Razor .g.cs files).
+        // Roslyn may store FilePath with forward slashes on Windows, so compare
+        // the original path string too, not just the normalized (backslash) form.
+        foreach (var project in sln.Projects)
+        {
+            IEnumerable<SourceGeneratedDocument> genDocs;
+            try { genDocs = await project.GetSourceGeneratedDocumentsAsync(ct); }
+            catch { continue; }
+
+            foreach (var genDoc in genDocs)
+            {
+                var gfp = genDoc.FilePath;
+                if (gfp is null) continue;
+                if (!string.Equals(gfp, normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(gfp, filePath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                return await GetSymbolFromDocumentAsync(genDoc, line, column, ct);
+            }
+        }
+
+        return null;
+    }
+
+    static async Task<ISymbol?> GetSymbolFromDocumentAsync(Document doc, int line, int column, CancellationToken ct)
+    {
+        var model = await doc.GetSemanticModelAsync(ct);
+        var tree = await doc.GetSyntaxTreeAsync(ct);
+        if (model is null || tree is null) return null;
+
+        var text = await tree.GetTextAsync(ct);
+        if (line < 1 || line > text.Lines.Count) return null;
+
+        var position = text.Lines[line - 1].Start + (column - 1);
+        var root = await tree.GetRootAsync(ct);
+        var token = root.FindToken(position);
+        var node = token.Parent;
+        if (node is null) return null;
+
+        var info = model.GetSymbolInfo(node);
+        return info.Symbol ?? info.CandidateSymbols.FirstOrDefault() ?? model.GetDeclaredSymbol(node);
+    }
+
     public async Task<SemanticModel?> GetSemanticModelAsync(string filePath, CancellationToken ct = default)
     {
         var sln = await GetSolutionAsync(ct);
@@ -230,6 +295,30 @@ public class WorkspaceService : IDisposable
 
         var doc = sln.GetDocument(docId);
         return doc is null ? null : await doc.GetSyntaxTreeAsync(ct);
+    }
+
+    // --- Auto-load ---
+
+    async Task TryAutoLoadAsync(CancellationToken ct)
+    {
+        var dir = Directory.GetCurrentDirectory();
+        (string pattern, Func<string, CancellationToken, Task<string>> loader)[] candidates =
+        [
+            ("*.sln",    (p, c) => LoadSolutionAsync(p, c)),
+            ("*.slnx",   (p, c) => LoadSlnxAsync(p, c)),
+            ("*.slnf",   (p, c) => LoadSlnfAsync(p, c)),
+            ("*.csproj", (p, c) => LoadProjectAsync(p, c)),
+        ];
+
+        foreach (var (pattern, loader) in candidates)
+        {
+            var files = Directory.GetFiles(dir, pattern);
+            if (files.Length > 0)
+            {
+                await loader(files[0], ct);
+                return;
+            }
+        }
     }
 
     // --- File watching ---

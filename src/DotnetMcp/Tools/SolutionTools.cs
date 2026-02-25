@@ -8,7 +8,9 @@ namespace DotnetMcp.Tools;
 public static class SolutionTools
 {
     [McpServerTool(Name = "load"), Description(
-        "Load a .sln/.slnx/.slnf solution or .csproj project file for analysis. Must be called before using other tools.")]
+        "Load a .sln/.slnx/.slnf solution or .csproj project file for Roslyn analysis. " +
+        "Must be called before using any other tools. Other tools will attempt to auto-detect a solution " +
+        "in the current working directory, but calling load explicitly is recommended for reliability.")]
     public static async Task<string> Load(
         WorkspaceService workspace,
         [Description("Full path to a .sln, .slnx, .slnf, or .csproj file")] string path,
