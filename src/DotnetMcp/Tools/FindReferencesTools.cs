@@ -39,7 +39,8 @@ public static class FindReferencesTools
         if (target is null)
             return $"No symbol found matching '{symbolName}'.";
 
-        await razorMapper.EnsureGeneratedFilesAsync(await workspace.GetSolutionAsync(ct), ct);
+        var sln = await workspace.GetSolutionAsync(ct);
+        await razorMapper.EnsureGeneratedFilesAsync(sln, ct);
 
         var refs = await workspace.FindReferencesAsync(target, ct);
         var limit = maxResults ?? 100;
@@ -56,7 +57,8 @@ public static class FindReferencesTools
             {
                 if (total >= limit)
                 {
-                    sb.AppendLine($"\n... truncated at {limit} results");
+                    var truncSuffix = razorTotal > 0 ? $" ({razorTotal} Razor)" : "";
+                    sb.AppendLine($"\n... truncated at {limit} results{truncSuffix}");
                     return sb.ToString().TrimEnd();
                 }
 
@@ -86,8 +88,7 @@ public static class FindReferencesTools
         // Fallback: text search in .cshtml files when no .g.cs mapping found
         if (razorTotal == 0)
         {
-            var sln2 = await workspace.GetSolutionAsync(ct);
-            var projectDirs = sln2.Projects
+            var projectDirs = sln.Projects
                 .Where(p => p.FilePath is not null)
                 .Select(p => Path.GetDirectoryName(p.FilePath)!)
                 .Distinct(StringComparer.OrdinalIgnoreCase);
