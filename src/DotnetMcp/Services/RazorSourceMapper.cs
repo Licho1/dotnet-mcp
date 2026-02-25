@@ -21,7 +21,7 @@ public class RazorSourceMapper
     readonly ConcurrentDictionary<string, byte> _builtProjects = new(StringComparer.OrdinalIgnoreCase);
 
     static readonly Regex OldLineDirective = new(@"^\s*#line\s+(\d+)\s+""([^""]+)""", RegexOptions.Compiled);
-    static readonly Regex NewLineDirective = new(@"^\s*#line\s+\((\d+),(\d+)\)-\(\d+,\d+\)\s+\d+\s+""([^""]+)""", RegexOptions.Compiled);
+    static readonly Regex NewLineDirective = new(@"^\s*#line\s+\((\d+),(\d+)\)-\(\d+,\d+\)(?:\s+\d+)?\s+""([^""]+)""", RegexOptions.Compiled);
     static readonly Regex HiddenOrDefault = new(@"^\s*#line\s+(hidden|default)\b", RegexOptions.Compiled);
 
     // Match both separator styles: Roslyn often uses forward slashes even on Windows
