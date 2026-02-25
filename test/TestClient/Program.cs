@@ -51,8 +51,8 @@ var isSelf = loadPath == serverPath;
 await Test("Load", "load", new() { ["path"] = loadPath });
 
 // Use different symbol names depending on what we loaded
-var testType = isSelf ? "WorkspaceService" : "CsvTable";
-var testMethod = isSelf ? "LoadSolutionAsync" : "ParseCsvLine";
+var testType = isSelf ? "WorkspaceService" : (args.Length > 1 ? args[1] : "CsvTable");
+var testMethod = isSelf ? "LoadSolutionAsync" : (args.Length > 2 ? args[2] : "ParseCsvLine");
 
 // === Type Hierarchy ===
 
@@ -137,6 +137,34 @@ if (isSelf)
             File.Delete(tempFile);
         Console.WriteLine("\n  Cleaned up TestWatchTarget.cs");
     }
+}
+
+// === Razor (.cshtml) Reference Test ===
+// When testing against a Razor project, verify that find-references returns .cshtml locations.
+
+if (!isSelf)
+{
+    Console.WriteLine("\n=== Razor (.cshtml) Reference Check ===");
+    var result = await client.CallToolAsync("find-references", new Dictionary<string, object?>
+    {
+        ["symbolName"] = testType
+    });
+    var text = GetText(result);
+    var cshtmlRefs = text.Split('\n').Where(l => l.Contains(".cshtml")).ToList();
+    if (cshtmlRefs.Count > 0)
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"✓ Found {cshtmlRefs.Count} .cshtml reference(s):");
+        foreach (var r in cshtmlRefs)
+            Console.WriteLine(r);
+    }
+    else
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("⚠ No .cshtml references found (symbol may not be used in Razor views)");
+        Console.WriteLine(text);
+    }
+    Console.ResetColor();
 }
 
 Console.WriteLine("\n\nAll tests completed!");

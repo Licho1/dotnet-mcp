@@ -11,7 +11,7 @@ MCP server providing semantic C# code understanding to AI assistants via [Roslyn
 | `load` | Load a .sln/.slnx/.slnf or .csproj file for analysis |
 | `get-source` | Resolve a symbol (by name or file:line:col) and get its source code + metadata. 4-tier resolution: local source, SourceLink, embedded PDB, decompilation |
 | `type-hierarchy` | Full type info: base types, interfaces, derived types/implementations, and all members |
-| `find-references` | Find all usages of a symbol across the solution (semantic, not text search) |
+| `find-references` | Find all usages of a symbol across the solution (semantic, not text search). Maps Razor `.g.cs` locations back to original `.cshtml` files. |
 | `find-implementations` | Find interface implementations or derived classes |
 | `find-callers` | Find all methods that call a given method |
 | `rename-symbol` | Semantic rename across entire solution, writes to disk |
